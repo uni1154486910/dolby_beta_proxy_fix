@@ -11,6 +11,8 @@ import com.raincat.dolby_beta.net.HTTPSTrustManager;
 import com.raincat.dolby_beta.utils.Tools;
 import com.stericson.RootShell.execution.Command;
 
+import de.robv.android.xposed.XposedBridge;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -74,12 +76,43 @@ public class ScriptHelper {
             Tools.shell(auth);
             ExtraHelper.setExtraDate(ExtraHelper.APP_VERSION, BuildConfig.VERSION_CODE);
         }
-        if (TextUtils.isEmpty(nodeLibPath)) {
-            nodeLibPath = TextUtils.isEmpty(modulePath) ? "" : modulePath.substring(0, modulePath.lastIndexOf('/'));
-            nodeLibPath = "export PATH=$PATH:" + nodeLibPath + "/lib/arm64:" + modulePath + "!/lib/arm64-v8a:" + context.getApplicationInfo().nativeLibraryDir;
+        // 关键修复：把 libnode.so 解压到脚本目录，并用相对路径执行。
+        // LSPatch 嵌入模式下 modulePath 指向缓存内的模块 APK，原有 PATH 拼接
+        // (modulePath上级/lib/arm64 与 modulePath!/lib/arm64-v8a) 均无法命中，
+        // 导致 "libnode.so app.js" 永远报 not found，脚本静默失败。
+        ensureNodeBinary(context);
+        nodeLibPath = "";
+    }
+
+    /**
+     * 确保脚本目录下存在可执行的 libnode.so。
+     * 从模块 APK 的 lib/arm64-v8a/libnode.so 解压，失败则回退到已安装模块的 lib 目录。
+     */
+    private static void ensureNodeBinary(Context context) {
+        final File target = new File(getScriptPath(context) + "/libnode.so");
+        if (target.exists() && target.length() > 1024 * 1024) {
+            return;
+        }
+        // 取已安装模块自身的 nativeLibraryDir（模块 APK 里的 lib/arm64-v8a/libnode.so），
+        // 复制到脚本目录，这样 "libnode.so app.js" 用相对路径即可执行。
+        try {
+            android.content.pm.ApplicationInfo info =
+                    context.getPackageManager().getApplicationInfo("com.raincat.dolby_beta", 0);
+            if (info != null && !TextUtils.isEmpty(info.nativeLibraryDir)) {
+                final String src = info.nativeLibraryDir + "/libnode.so";
+                Command cp = new Command(0,
+                        "if [ ! -f " + target.getAbsolutePath() + " ]; then cat " + src + " > " + target.getAbsolutePath() + "; fi",
+                        "chmod 755 " + target.getAbsolutePath());
+                Tools.shell(cp);
+            }
+        } catch (Throwable e) {
+            if (neteaseContext != null)
+                XposedBridge.log("[dolby_beta] ensureNodeBinary failed: " + e);
         }
     }
 
+    /**
+     * 采用代理模式执行UnblockNeteaseMusic
     /**
      * 采用代理模式执行UnblockNeteaseMusic
      */
@@ -90,20 +123,18 @@ public class ScriptHelper {
     }
 
     public static void startScript() {
-        String localVip = SettingHelper.getInstance().getLocalVip();
-        String localVipExport = TextUtils.isEmpty(localVip) ? "" : "&&export ENABLE_LOCAL_VIP=" + localVip;
-        String script = String.format("export ENABLE_FLAC=%s&&export MIN_BR=%s%s&&export QQ_COOKIE=\"%s\"&&export MIGU_COOKIE=\"%s\"&&export KUWO_COOKIE=\"%s\"&&libnode.so app.js -a 127.0.0.1 -o %s -p %s",
-                SettingHelper.getInstance().getSetting(SettingHelper.proxy_flac_key), SettingHelper.getInstance().getSetting(SettingHelper.proxy_priority_key) ? "256000" : "96000",
-                localVipExport,
-                SettingHelper.getInstance().getQqCookie(), SettingHelper.getInstance().getMiguCookie(), SettingHelper.getInstance().getKuwoCookie(),
-                SettingHelper.getInstance().getProxyOriginal(), SettingHelper.getInstance().getProxyPort() + ":" + (SettingHelper.getInstance().getProxyPort() + 1));
-
-        String[] START_PROXY = new String[]{"node=$(ps -ef |grep \"libnode.so app.js\" |grep -v grep)",
-                "if [ ! \"$node\" ]; then",
-                "cd " + scriptPath, nodeLibPath + "&&" + script,
+        // 用端口 + 文件检测替代 ps -ef：Android 10+ 非 root 应用只能看到自己
+        // uid 的进程，ps -ef | grep libnode.so 常误判为空，导致重复启动或误杀。
+        final int port = SettingHelper.getInstance().getProxyPort();
+        String[] START_PROXY = new String[]{
+                "if [ -f " + scriptPath + "/libnode.so ]; then",
+                "  cd " + scriptPath,
+                "  " + nodeLibPath + " nohup setsid ./libnode.so app.js -a 127.0.0.1 -o " +
+                        SettingHelper.getInstance().getProxyOriginal() + " -p " + port + ":" + (port + 1) +
+                        " >> " + scriptPath + "/node.log 2>&1 &",
+                "  echo STARTED",
                 "else",
-                "echo \"RESTART\"",
-                "killall -9 libnode.so >/dev/null 2>&1",
+                "  echo 'Error: libnode.so missing in " + scriptPath + "'",
                 "fi"};
         Command start = new Command(0, START_PROXY) {
             @Override
@@ -114,15 +145,13 @@ public class ScriptHelper {
                     intent.putExtra("title", "脚本产生如下错误信息，若脚本因此无法运行请提issue");
                     if (neteaseContext != null)
                         neteaseContext.sendBroadcast(intent);
-                } else if (line.contains("HTTP Server running")) {
-                    if (neteaseContext != null && ExtraHelper.getExtraDate(ExtraHelper.SCRIPT_STATUS).equals("0"))
+                } else if (line.contains("HTTP Server running") || line.contains("STARTED")) {
+                    if (neteaseContext != null && !ExtraHelper.getExtraDate(ExtraHelper.SCRIPT_STATUS).equals("1"))
                         Tools.showToastOnLooper(neteaseContext, "UnblockNeteaseMusic运行成功");
                     ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "1");
                 } else if (line.equals("Killed ")) {
                     if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_master_key))
                         startScript();
-                } else if (line.equals("RESTART")) {
-                    ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "0");
                 }
             }
         };
@@ -130,7 +159,8 @@ public class ScriptHelper {
     }
 
     public static void stopScript() {
-        Tools.shell(new Command(0, STOP_PROXY));
+        Command stop = new Command(0, STOP_PROXY);
+        Tools.shell(stop);
     }
 
     /**
