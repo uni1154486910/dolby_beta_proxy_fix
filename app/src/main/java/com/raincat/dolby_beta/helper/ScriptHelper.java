@@ -86,36 +86,42 @@ public class ScriptHelper {
 
     /**
      * 确保脚本目录下存在可执行的 libnode.so。
-     * 从模块 APK 的 lib/arm64-v8a/libnode.so 解压，失败则回退到已安装模块的 lib 目录。
+     *
+     * 注意：不能用跨应用路径复制。模块在 LSPatch 嵌入模式下运行在网易云进程里，
+     * 属于 untrusted_app 域，读另一个应用（com.raincat.dolby_beta）的
+     * /data/app/.../lib/ 会被 SELinux 拦截，且 cat 失败没有任何提示。
+     *
+     * 因此改为：把 libnode.so 打包进模块 APK 的 assets，由这里用 Java 直接解压，
+     * 全程只操作本应用私有目录，不需要 root，也不跨应用。
      */
     private static void ensureNodeBinary(Context context) {
         final File target = new File(getScriptPath(context) + "/libnode.so");
         if (target.exists() && target.length() > 1024 * 1024) {
             return;
         }
-        // 取已安装模块自身的 nativeLibraryDir（模块 APK 里的 lib/arm64-v8a/libnode.so），
-        // 复制到脚本目录，这样 "libnode.so app.js" 用相对路径即可执行。
+        InputStream is = null;
+        java.io.FileOutputStream fos = null;
         try {
-            android.content.pm.ApplicationInfo info =
-                    context.getPackageManager().getApplicationInfo("com.raincat.dolby_beta", 0);
-            if (info != null && !TextUtils.isEmpty(info.nativeLibraryDir)) {
-                final String src = info.nativeLibraryDir + "/libnode.so";
-                Command cp = new Command(0,
-                        "if [ ! -f " + target.getAbsolutePath() + " ]; then cat " + src + " > " + target.getAbsolutePath() + "; fi",
-                        "chmod 755 " + target.getAbsolutePath());
-                Tools.shell(cp);
+            // assets/libnode.so（构建时由 gradle 从 jniLibs 复制过来）
+            is = context.getAssets().open("libnode.so");
+            fos = new java.io.FileOutputStream(target);
+            byte[] buf = new byte[81920];
+            int len;
+            while ((len = is.read(buf)) != -1) {
+                fos.write(buf, 0, len);
             }
+            fos.flush();
+            XposedBridge.log("[dolby_beta] libnode.so extracted -> " + target.length() + " bytes");
         } catch (Throwable e) {
-            if (neteaseContext != null)
-                XposedBridge.log("[dolby_beta] ensureNodeBinary failed: " + e);
+            XposedBridge.log("[dolby_beta] extract libnode.so failed: " + e);
+        } finally {
+            try { if (fos != null) fos.close(); } catch (Throwable ignored) {}
+            try { if (is != null) is.close(); } catch (Throwable ignored) {}
         }
+        // 赋予可执行权限（Java 无法直接 chmod，这里用 shell 只做 chmod）
+        Command chmod = new Command(0, "chmod 755 " + target.getAbsolutePath());
+        Tools.shell(chmod);
     }
-
-    /**
-     * 采用代理模式执行UnblockNeteaseMusic
-    /**
-     * 采用代理模式执行UnblockNeteaseMusic
-     */
     public static void startHttpProxyMode(final Context context) {
         stopScript();
         ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "1");
