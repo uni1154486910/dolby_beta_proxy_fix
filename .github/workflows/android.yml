@@ -1,0 +1,50 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/*.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v2
+
+      - name: set up JDK 1.8
+        uses: actions/setup-java@v1
+        with:
+          java-version: 1.8
+
+      - name: Sync latest Unblocked Music source code
+        run: |
+          git clone --depth=1 --branch enhanced https://github.com/UnblockNeteaseMusic/server.git
+          cd server
+          git archive --format=zip HEAD -o ../UnblockNeteaseMusic.zip
+          cd ..
+          rm -f ./app/src/main/assets/UnblockNeteaseMusic.zip
+          mv ./UnblockNeteaseMusic.zip ./app/src/main/assets/UnblockNeteaseMusic.zip
+          rm -rf server
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew app:assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v2
+        with:
+          name: app-release
+          path: ${{github.workspace}}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 30

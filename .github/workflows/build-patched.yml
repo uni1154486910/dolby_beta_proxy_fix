@@ -1,0 +1,49 @@
+name: Build Dolby Beta (patched proxy probe)
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Show patch marker
+        run: |
+          echo "== verify patched ProxyHook =="
+          grep -n "isProxyAvailable" app/src/main/java/com/raincat/dolby_beta/hook/ProxyHook.java
+
+      - name: Sync latest UnblockNeteaseMusic source
+        run: |
+          git clone --depth=1 --branch enhanced https://github.com/UnblockNeteaseMusic/server.git server
+          cd server
+          git archive --format=zip HEAD -o ../UnblockNeteaseMusic.zip
+          cd ..
+          rm -f ./app/src/main/assets/UnblockNeteaseMusic.zip
+          mv ./UnblockNeteaseMusic.zip ./app/src/main/assets/UnblockNeteaseMusic.zip
+          rm -rf server
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolby-beta-patched
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
