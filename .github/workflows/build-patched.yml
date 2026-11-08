@@ -19,10 +19,12 @@ jobs:
           distribution: temurin
           java-version: '8'
 
-      - name: Show patch marker
+      - name: Verify patch markers
         run: |
-          echo "== verify patched ProxyHook =="
+          echo "== ProxyHook =="
           grep -n "isProxyAvailable" app/src/main/java/com/raincat/dolby_beta/hook/ProxyHook.java
+          echo "== ScriptHelper =="
+          grep -n "ensureNodeBinary" app/src/main/java/com/raincat/dolby_beta/helper/ScriptHelper.java
 
       - name: Sync latest UnblockNeteaseMusic source
         run: |
@@ -33,13 +35,14 @@ jobs:
           rm -f ./app/src/main/assets/UnblockNeteaseMusic.zip
           mv ./UnblockNeteaseMusic.zip ./app/src/main/assets/UnblockNeteaseMusic.zip
           rm -rf server
-          rm -rf server
 
       - name: Bundle libnode.so into assets
         run: |
           ls -la app/src/main/jniLibs/arm64-v8a/
           cp app/src/main/jniLibs/arm64-v8a/libnode.so app/src/main/assets/libnode.so
           ls -la app/src/main/assets/
+
+      - name: Make gradlew executable
         run: chmod +x gradlew
 
       - name: Build with Gradle
